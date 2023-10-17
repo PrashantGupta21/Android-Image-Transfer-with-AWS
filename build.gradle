@@ -1,0 +1,67 @@
+buildscript {
+    repositories {
+        mavenCentral()
+        google()
+        jcenter()
+    }
+    dependencies {
+        classpath 'com.android.tools.build:gradle:7.0.0'
+        classpath 'com.google.gms:google-services:4.0.1'
+
+    }
+}
+plugins{
+    id 'com.chaquo.python' version '14.0.2' apply false
+}
+apply plugin: 'com.android.application'
+apply plugin: 'com.chaquo.python'
+android {
+    compileSdkVersion 21
+    sourceSets {
+        main {
+            manifest.srcFile 'AndroidManifest.xml'
+            java.srcDirs = ['src']
+            resources.srcDirs = ['src']
+            aidl.srcDirs = ['src']
+            renderscript.srcDirs = ['src']
+            res.srcDirs = ['res']
+            assets.srcDirs = ['assets']
+            python.srcDir "java/main/python"
+        }
+
+        // Move the tests to tests/java, tests/res, etc...
+
+        // Move the build types to build-types/<type>
+        // For instance, build-types/debug/java, build-types/debug/AndroidManifest.xml, ...
+        // This moves them out of them default location under src/<type>/... which would
+        // conflict with src/ being used by the main source set.
+        // Adding new build types or product flavors should be accompanied
+        // by a similar customization.
+        debug.setRoot('build-types/debug')
+        release.setRoot('build-types/release')
+    }
+    defaultConfig {
+        minSdkVersion 21
+        targetSdkVersion 21
+        ndk {
+            abiFilters "armeabi-v7a", "arm64-v8a", "x86", "x86_64"
+        }
+        python {
+            version "3.11"
+            pip {
+                install "pydrive"
+                install "Google"
+                install "boto3"
+            }
+        }
+
+    }
+    productFlavors {
+    }
+}
+repositories {
+    google()
+}
+dependencies {
+    implementation 'com.android.support:support-v4:21.0.3'
+}

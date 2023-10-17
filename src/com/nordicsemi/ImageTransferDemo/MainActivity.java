@@ -1,0 +1,775 @@
+/*
+ * Copyright (C) 2013 The Android Open Source Project
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package com.nordicsemi.ImageTransferDemo;
+
+import java.io.ByteArrayInputStream;
+
+import android.media.MediaCodec;
+import android.media.MediaCodecInfo;
+import android.media.MediaFormat;
+import android.os.Environment;
+
+import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileNotFoundException;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import java.text.DateFormat;
+import java.text.DecimalFormat;
+import java.text.ParseException;
+import java.text.SimpleDateFormat;
+import java.util.Arrays;
+import java.util.Comparator;
+import java.util.Date;
+import java.util.Locale;
+import java.util.List;
+
+import android.app.Activity;
+import android.app.ProgressDialog;
+import android.bluetooth.BluetoothAdapter;
+import android.bluetooth.BluetoothDevice;
+
+import android.graphics.Bitmap;
+import android.graphics.ImageFormat;
+import android.graphics.YuvImage;
+
+import android.content.BroadcastReceiver;
+import android.content.ComponentName;
+import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
+import android.content.ServiceConnection;
+import android.content.res.Configuration;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
+import android.os.Bundle;
+import android.os.Handler;
+import android.os.IBinder;
+import android.os.Message;
+import android.support.v4.content.LocalBroadcastManager;
+import android.text.Html;
+import android.util.Log;
+import android.view.View;
+import android.view.Surface;
+import android.widget.AdapterView;
+import android.widget.Button;
+import android.widget.ImageView;
+import android.widget.ProgressBar;
+import android.widget.RadioGroup;
+import android.widget.Spinner;
+import android.widget.TextView;
+import android.widget.Toast;
+import java.util.ArrayList;
+
+import com.chaquo.python.PyException;
+import com.chaquo.python.PyObject;
+import com.chaquo.python.Python;
+import com.chaquo.python.android.AndroidPlatform;
+
+import android.content.Context;
+import android.media.MediaMetadataRetriever;
+import android.media.MediaMuxer;
+
+import java.io.File;
+
+//import software.amazon.awssdk.core.sync.RequestBody;
+//import software.amazon.awssdk.core.waiters.WaiterResponse;
+//import software.amazon.awssdk.services.s3.S3Client;
+//import software.amazon.awssdk.services.s3.model.HeadObjectRequest;
+//import software.amazon.awssdk.services.s3.model.HeadObjectResponse;
+//import software.amazon.awssdk.services.s3.model.PutObjectRequest;
+//import software.amazon.awssdk.services.s3.waiters.S3Waiter;
+
+
+
+
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipOutputStream;
+
+public class MainActivity extends Activity implements RadioGroup.OnCheckedChangeListener {
+    private static final int REQUEST_SELECT_DEVICE = 1;
+    private static final int REQUEST_ENABLE_BT = 2;
+    private static final int UART_PROFILE_READY = 10;
+    public static final String TAG = "image_transfer_main";
+    private static final int UART_PROFILE_CONNECTED = 20;
+    private static final int UART_PROFILE_DISCONNECTED = 21;
+    private static final int STATE_OFF = 10;
+    private static final int SETTINGS_ACTIVITY = 100;
+
+    private static final String FONT_LABEL_APP_NORMAL = "<font color='#EE0000'>";
+    private static final String FONT_LABEL_APP_ERROR = "<font color='#EE0000'>";
+    private static final String FONT_LABEL_PEER_NORMAL = "<font color='#EE0000'>";
+    private static final String FONT_LABEL_PEER_ERROR = "<font color='#EE0000'>";
+    public enum AppLogFontType {APP_NORMAL, APP_ERROR, PEER_NORMAL, PEER_ERROR};
+    private String mLogMessage = "";
+
+    private TextView mTextViewLog, mTextViewFileLabel, mTextViewPictureStatus, mTextViewPictureFpsStatus, mTextViewConInt, mTextViewMtu;
+    private Button mBtnTakePicture, mBtnStartStream;
+    private ProgressBar mProgressBarFileStatus;
+    private ImageView mMainImage;
+    private Spinner mSpinnerResolution, mSpinnerPhy;
+
+    private int mState = UART_PROFILE_DISCONNECTED;
+    private ImageTransferService mService = null;
+    private BluetoothDevice mDevice = null;
+    private BluetoothAdapter mBtAdapter = null;
+    private Button btnConnectDisconnect;
+    private boolean mMtuRequested;
+    private static final String VIDEO_EXTENSION = ".mp4";
+    private byte []mUartData = new byte[6];
+    private long mStartTimeImageTransfer;
+
+    // File transfer variables
+    private int mBytesTransfered = 0, mBytesTotal = 0;
+    private byte []mDataBuffer;
+    private boolean mStreamActive = false;
+
+    private ProgressDialog mConnectionProgDialog;
+
+    public enum AppRunMode {Disconnected, Connected, ConnectedDuringSingleTransfer, ConnectedDuringStream};
+    public enum BleCommand {NoCommand, StartSingleCapture, StartStreaming, StopStreaming, ChangeResolution, ChangePhy, GetBleParams};
+
+    Handler guiUpdateHandler = new Handler();
+    Runnable guiUpdateRunnable = new Runnable(){
+        @Override
+        public void run(){
+            if(mTextViewFileLabel != null) {
+                mTextViewFileLabel.setText("Incoming: " + String.valueOf(mBytesTransfered) + "/" + String.valueOf(mBytesTotal));
+                if(mBytesTotal > 0) {
+                    mProgressBarFileStatus.setProgress(mBytesTransfered * 100 / mBytesTotal);
+                }
+            }
+            guiUpdateHandler.postDelayed(this, 50);
+        }
+    };
+
+
+
+    private static void zipFolder() throws IOException {
+        try {
+            String inputFolderPath = new File(Environment.getExternalStorageDirectory(),"Images").toString();
+            String outZipPath = new File(Environment.getExternalStorageDirectory(),"Output.zip").toString();
+            FileOutputStream fos = new FileOutputStream(outZipPath);
+            ZipOutputStream zos = new ZipOutputStream(fos);
+            File srcFile = new File(inputFolderPath);
+            File[] files = srcFile.listFiles();
+            Log.d("", "Zip directory: " + srcFile.getName());
+            for (int i = 0; i < files.length; i++) {
+                Log.d("", "Adding file: " + files[i].getName());
+                byte[] buffer = new byte[1024];
+                FileInputStream fis = new FileInputStream(files[i]);
+                zos.putNextEntry(new ZipEntry(files[i].getName()));
+                int length;
+                while ((length = fis.read(buffer)) > 0) {
+                    zos.write(buffer, 0, length);
+                }
+                fis.close();
+            }
+            zos.close();
+        } catch (IOException ioe) {
+            Log.e("", ioe.getMessage());
+        }
+    }
+
+
+    public void temp() throws IOException {
+        File zipFile = new File(Environment.getExternalStorageDirectory(),"output.zip");
+        FileOutputStream fos = new FileOutputStream(zipFile);
+        ZipOutputStream zos = new ZipOutputStream(fos);
+
+        // Add the files to the zip file.
+        File file1 = new File("file1.txt");
+        File file2 = new File("file2.jpg");
+        ZipEntry entry1 = new ZipEntry(file1.getName());
+        zos.putNextEntry(entry1);
+        FileInputStream fis1 = new FileInputStream(file1);
+        byte[] buffer = new byte[1024];
+        int bytesRead;
+        while ((bytesRead = fis1.read(buffer)) != -1) {
+            zos.write(buffer, 0, bytesRead);
+        }
+        fis1.close();
+
+        ZipEntry entry2 = new ZipEntry(file2.getName());
+        zos.putNextEntry(entry2);
+        FileInputStream fis2 = new FileInputStream(file2);
+        bytesRead = 0;
+        while ((bytesRead = fis2.read(buffer)) != -1) {
+            zos.write(buffer, 0, bytesRead);
+        }
+        fis2.close();
+
+        // Close the zip file.
+        zos.close();
+    }
+
+
+    @Override
+    public void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+        setContentView(R.layout.main);
+
+
+        if (! Python.isStarted()) {
+            Python.start(new AndroidPlatform(this));
+        }
+        final Python py = Python.getInstance();
+
+
+        mBtAdapter = BluetoothAdapter.getDefaultAdapter();
+        if (mBtAdapter == null) {
+            Toast.makeText(this, "Bluetooth is not available", Toast.LENGTH_LONG).show();
+            finish();
+            return;
+        }
+        btnConnectDisconnect    = (Button) findViewById(R.id.btn_select);
+        mTextViewLog = (TextView)findViewById(R.id.textViewLog);
+        mTextViewFileLabel = (TextView)findViewById(R.id.textViewFileLabel);
+        mTextViewPictureStatus = (TextView)findViewById(R.id.textViewImageStatus);
+        mTextViewPictureFpsStatus = (TextView)findViewById(R.id.textViewImageFpsStatus);
+        mTextViewConInt = (TextView)findViewById(R.id.textViewCI);
+        mTextViewMtu = (TextView)findViewById(R.id.textViewMTU);
+        mProgressBarFileStatus = (ProgressBar)findViewById(R.id.progressBarFile);
+        mBtnTakePicture = (Button)findViewById(R.id.buttonTakePicture);
+        mBtnStartStream = (Button)findViewById(R.id.buttonStartStream);
+        mMainImage = (ImageView)findViewById(R.id.imageTransfered);
+        mSpinnerResolution = (Spinner)findViewById(R.id.spinnerResolution);
+        mSpinnerResolution.setSelection(1);
+        mSpinnerPhy = (Spinner)findViewById(R.id.spinnerPhy);
+        mConnectionProgDialog = new ProgressDialog(this);
+        mConnectionProgDialog.setTitle("Connecting...");
+        mConnectionProgDialog.setCancelable(false);
+        mBtnTakePicture.setText("Send File");
+        service_init();
+        for(int i = 0; i < 6; i++) mUartData[i] = 0;
+
+        // Handler Disconnect & Connect button
+        btnConnectDisconnect.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                if (!mBtAdapter.isEnabled()) {
+                    Log.i(TAG, "onClick - BT not enabled yet");
+                    Intent enableIntent = new Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE);
+                    startActivityForResult(enableIntent, REQUEST_ENABLE_BT);
+                } else {
+                    if (btnConnectDisconnect.getText().equals("Connect")) {
+
+                        //Connect button pressed, open DeviceListActivity class, with popup windows that scan for devices
+
+                        Intent newIntent = new Intent(MainActivity.this, DeviceListActivity.class);
+                        startActivityForResult(newIntent, REQUEST_SELECT_DEVICE);
+                    } else {
+                        //Disconnect button pressed
+                        if (mDevice != null) {
+                            mService.disconnect();
+                        }
+                    }
+                }
+            }
+        });
+
+        mBtnTakePicture.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                if(mService != null) {
+                    new Thread(new Runnable() {
+                    @Override
+                    public void run() {
+                        File outputFile = new File(Environment.getExternalStorageDirectory(), "Output.zip");
+                        PyObject pyo = py.getModule("transfer");
+                        PyObject obj = pyo.callAttr("main", outputFile.toString());
+                        System.out.println("File Sent Successfully");
+                        }
+                    }).start();
+                    setGuiByAppMode(AppRunMode.Connected);
+                }
+            }
+        });
+
+        mBtnStartStream.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                if(mService != null){
+                    if(!mStreamActive) {
+                        mStreamActive = true;
+
+                        mService.sendCommand(BleCommand.StartStreaming.ordinal(), null);
+                        setGuiByAppMode(AppRunMode.ConnectedDuringStream);
+                    }
+                    else {
+                        mStreamActive = false;
+                        new Thread(new Runnable() {
+                            @Override
+                            public void run() {
+                                // convertImagesToVideo();
+                                // File inputFile = new File(Environment.getExternalStorageDirectory(), "Images");
+                                File outputFile = new File(Environment.getExternalStorageDirectory(), "Output.zip");
+                                try {
+                                    zipFolder();
+                                } catch (IOException e) {
+                                    throw new RuntimeException(e);
+                                }
+                            }
+                        }).start();
+
+                        mService.sendCommand(BleCommand.StopStreaming.ordinal(), null);
+                        setGuiByAppMode(AppRunMode.Connected);
+                    }
+                }
+            }
+        });
+
+
+
+        mSpinnerResolution.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            @Override
+            public void onItemSelected(AdapterView<?> parentView, View selectedItemView, int position, long id) {
+                if(mService != null && mService.isConnected()){
+                    byte []cmdData = new byte[1];
+                    cmdData[0] = (byte)position;
+                    mService.sendCommand(BleCommand.ChangeResolution.ordinal(), cmdData);
+                }
+            }
+
+            @Override
+            public void onNothingSelected(AdapterView<?> parentView) {
+            }
+        });
+
+        mSpinnerPhy.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            @Override
+            public void onItemSelected(AdapterView<?> parentView, View selectedItemView, int position, long id) {
+                if(mService != null && mService.isConnected()){
+                    byte []cmdData = new byte[1];
+                    cmdData[0] = (byte)position;
+                    mService.sendCommand(BleCommand.ChangePhy.ordinal(), cmdData);
+                }
+            }
+
+            @Override
+            public void onNothingSelected(AdapterView<?> parentView) {
+            }
+        });
+
+        // Set initial UI state
+        guiUpdateHandler.postDelayed(guiUpdateRunnable, 0);
+
+        setGuiByAppMode(AppRunMode.Disconnected);
+    }
+
+
+    //UART service connected/disconnected
+    private ServiceConnection mServiceConnection = new ServiceConnection() {
+        public void onServiceConnected(ComponentName className, IBinder rawBinder) {
+            mService = ((ImageTransferService.LocalBinder) rawBinder).getService();
+            Log.d(TAG, "onServiceConnected mService= " + mService);
+            if (!mService.initialize()) {
+                Log.e(TAG, "Unable to initialize Bluetooth");
+                finish();
+            }
+        }
+
+        public void onServiceDisconnected(ComponentName classname) {
+       ////     mService.disconnect(mDevice);
+        		mService = null;
+        }
+    };
+
+    private void setGuiByAppMode(AppRunMode appMode)
+    {
+        switch(appMode)
+        {
+            case Connected:
+                mBtnTakePicture.setEnabled(true);
+                mBtnStartStream.setEnabled(true);
+                btnConnectDisconnect.setText("Disconnect");
+                mBtnStartStream.setText("Start Stream");
+                mSpinnerResolution.setEnabled(true);
+                mSpinnerPhy.setEnabled(true);
+                break;
+
+            case Disconnected:
+                mBtnTakePicture.setEnabled(false);
+                mBtnStartStream.setEnabled(false);
+                btnConnectDisconnect.setText("Connect");
+                mBtnStartStream.setText("Start Stream");
+                mTextViewPictureStatus.setVisibility(View.INVISIBLE);
+                mTextViewPictureFpsStatus.setVisibility(View.INVISIBLE);
+                mSpinnerResolution.setEnabled(false);
+                mSpinnerResolution.setSelection(1);
+                mSpinnerPhy.setEnabled(false);
+                mSpinnerPhy.setSelection(0);
+                break;
+
+            case ConnectedDuringSingleTransfer:
+                mBtnTakePicture.setEnabled(false);
+                mBtnStartStream.setEnabled(false);
+                break;
+
+            case ConnectedDuringStream:
+                mBtnTakePicture.setEnabled(false);
+                mBtnStartStream.setEnabled(true);
+                mBtnStartStream.setText("Stop Stream");
+                break;
+        }
+    }
+
+    private void writeToLog(String message, AppLogFontType msgType){
+        String currentDateTimeString = DateFormat.getTimeInstance().format(new Date());
+        String newMessage = currentDateTimeString + " - " + message;
+        String fontHtmlTag;
+        switch(msgType){
+            case APP_NORMAL:
+                fontHtmlTag = "<font color='#000000'>";
+                break;
+            case APP_ERROR:
+                fontHtmlTag = "<font color='#AA0000'>";
+                break;
+            case PEER_NORMAL:
+                fontHtmlTag = "<font color='#0000AA'>";
+                break;
+            case PEER_ERROR:
+                fontHtmlTag = "<font color='#FF00AA'>";
+                break;
+            default:
+                fontHtmlTag = "<font>";
+                break;
+        }
+        mLogMessage = fontHtmlTag + newMessage + "</font>" + "<br>" + mLogMessage;
+        mTextViewLog.setText(Html.fromHtml(mLogMessage));
+    }
+
+    private void saveImage(Bitmap bitmap) {
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                String timeStamp = new SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.getDefault()).format(new Date());
+                String imageFileName = timeStamp + ".jpg";
+
+                // Create a directory if it doesn't exist
+                File storageDir = new File(Environment.getExternalStorageDirectory(), "Images");
+                if (!storageDir.exists()) {
+                    storageDir.mkdirs();
+                }
+
+                // Create the image file
+                File imageFile = new File(storageDir, imageFileName);
+                FileOutputStream outputStream = null;
+                try {
+                    outputStream = new FileOutputStream(imageFile);
+                    bitmap.compress(Bitmap.CompressFormat.JPEG, 100, outputStream);
+                    outputStream.flush();
+                    outputStream.close();
+                    Log.d(TAG, "Image saved: " + imageFile.getAbsolutePath());
+                } catch (Exception e) {
+                    Log.e(TAG, "Error saving image: " + e.getMessage());
+                }
+            }
+        }).start();
+    }
+    private final BroadcastReceiver UARTStatusChangeReceiver = new BroadcastReceiver() {
+        public void onReceive(Context context, Intent intent) {
+        String action = intent.getAction();
+
+        final Intent mIntent = intent;
+        //*********************//
+        if (action.equals(ImageTransferService.ACTION_GATT_CONNECTED)) {
+            runOnUiThread(new Runnable() {
+                public void run() {
+                    mMtuRequested = false;
+                    mConnectionProgDialog.hide();
+                    Log.d(TAG, "UART_CONNECT_MSG");
+                    writeToLog("Connected", AppLogFontType.APP_NORMAL);
+                }
+            });
+        }
+
+          //*********************//
+        if (action.equals(ImageTransferService.ACTION_GATT_DISCONNECTED)) {
+            runOnUiThread(new Runnable() {
+                public void run() {
+                    setGuiByAppMode(AppRunMode.Disconnected);
+                    mState = UART_PROFILE_DISCONNECTED;
+                    mUartData[0] = mUartData[1] = mUartData[2] = mUartData[3] = mUartData[4] = mUartData[5] = 0;
+                    mService.close();
+                    mTextViewMtu.setText("-");
+                    mTextViewConInt.setText("-");
+                    mConnectionProgDialog.hide();
+                    Log.d(TAG, "UART_DISCONNECT_MSG");
+                    writeToLog("Disconnected", AppLogFontType.APP_NORMAL);
+                }
+            });
+        }
+
+        //*********************//
+        if (action.equals(ImageTransferService.ACTION_GATT_SERVICES_DISCOVERED)) {
+            mService.enableTXNotification();
+            mService.sendCommand(BleCommand.GetBleParams.ordinal(), null);
+            setGuiByAppMode(AppRunMode.Connected);
+        }
+
+        //*********************//
+        if (action.equals(ImageTransferService.ACTION_DATA_AVAILABLE)) {
+
+            final byte[] txValue = intent.getByteArrayExtra(ImageTransferService.EXTRA_DATA);
+            runOnUiThread(new Runnable() {
+            public void run() {
+                try {
+                    System.arraycopy(txValue, 0, mDataBuffer, mBytesTransfered, txValue.length);
+                    if(mBytesTransfered == 0){
+                        Log.w(TAG, "First packet received: " + String.valueOf(txValue.length) + " bytes");
+                    }
+                    mBytesTransfered += txValue.length;
+                    if(mBytesTransfered >= mBytesTotal) {
+                        long elapsedTime = System.currentTimeMillis() - mStartTimeImageTransfer;
+                        float elapsedSeconds = (float)elapsedTime / 1000.0f;
+                        DecimalFormat df = new DecimalFormat("0.0");
+                        df.setMaximumFractionDigits(1);
+                        String elapsedSecondsString = df.format(elapsedSeconds);
+                        String kbpsString = df.format((float)mDataBuffer.length / elapsedSeconds * 8.0f / 1000.0f);
+                        //writeToLog("Completed in " + elapsedSecondsString + " seconds. " + kbpsString + " kbps", AppLogFontType.APP_NORMAL);
+                        mTextViewPictureStatus.setText(String.valueOf(mDataBuffer.length / 1024) + "kB - " + elapsedSecondsString + " seconds - " + kbpsString + " kbps");
+                        mTextViewPictureStatus.setVisibility(View.VISIBLE);
+                        mTextViewPictureFpsStatus.setText(df.format(1.0f / elapsedSeconds)  + " FPS");
+                        mTextViewPictureFpsStatus.setVisibility(View.VISIBLE);
+                        Bitmap bitmap = null;
+                        Log.w(TAG, "attempting JPEG decode");
+                        try {
+                            byte[] jpgHeader = new byte[]{-1, -40, -1, -32};
+                            if(Arrays.equals(jpgHeader, Arrays.copyOfRange(mDataBuffer, 0, 4))) {
+                                // New plus version of the Arducam mini 2MP module
+                                bitmap = BitmapFactory.decodeByteArray(mDataBuffer, 0, mDataBuffer.length);
+                                mMainImage.setImageBitmap(bitmap);
+                            }
+                            else if(Arrays.equals(jpgHeader, Arrays.copyOfRange(mDataBuffer, 1, 5))){
+                                // Old version of the Arducam mini 2MP module
+                                bitmap = BitmapFactory.decodeByteArray(mDataBuffer, 1, mDataBuffer.length-1);
+                                mMainImage.setImageBitmap(bitmap);
+                            }
+                            else {
+                                Log.w(TAG, "JPG header missing!! Image data corrupt.");
+                            }
+                            saveImage(bitmap);
+                        } catch (Exception e) {
+                            Log.w(TAG, "Bitmapfactory fail :(");
+                        }
+                        if(!mStreamActive) {
+                            setGuiByAppMode(AppRunMode.Connected);
+                        }
+                    }
+                } catch (Exception e) {
+                    Log.e(TAG, e.toString());
+                }
+            }
+            });
+        }
+        //*********************//
+        if (action.equals(ImageTransferService.ACTION_IMG_INFO_AVAILABLE)) {
+            final byte[] txValue = intent.getByteArrayExtra(ImageTransferService.EXTRA_DATA);
+            runOnUiThread(new Runnable() {
+                public void run() {
+                    try {
+                        switch(txValue[0]) {
+                            case 1:
+                                // Start a new file transfer
+                                ByteBuffer byteBuffer = ByteBuffer.wrap(Arrays.copyOfRange(txValue, 1, 5));
+                                byteBuffer.order(ByteOrder.LITTLE_ENDIAN);
+                                int fileSize = byteBuffer.getInt();
+                                mBytesTotal = fileSize;
+                                mDataBuffer = new byte[fileSize];
+                                mTextViewFileLabel.setText("Incoming file: " + String.valueOf(fileSize) + " bytes.");
+                                mBytesTransfered = 0;
+                                mStartTimeImageTransfer = System.currentTimeMillis();
+                                break;
+
+                            case 2:
+                                ByteBuffer mtuBB = ByteBuffer.wrap(Arrays.copyOfRange(txValue, 1, 3));
+                                mtuBB.order(ByteOrder.LITTLE_ENDIAN);
+                                short mtu = mtuBB.getShort();
+                                mTextViewMtu.setText(String.valueOf(mtu) + " bytes");
+                                if(!mMtuRequested && mtu < 64){
+                                    mService.requestMtu(247);
+                                    writeToLog("Requesting 247 byte MTU from app", AppLogFontType.APP_NORMAL);
+                                    mMtuRequested = true;
+                                }
+                                ByteBuffer ciBB = ByteBuffer.wrap(Arrays.copyOfRange(txValue, 3, 5));
+                                ciBB.order(ByteOrder.LITTLE_ENDIAN);
+                                short conInterval = ciBB.getShort();
+                                mTextViewConInt.setText(String.valueOf((float)conInterval * 1.25f) + "ms");
+                                short txPhy = txValue[5];
+                                short rxPhy = txValue[6];
+                                if(txPhy == 0x0001 && mSpinnerPhy.getSelectedItemPosition() == 1) {
+                                    mSpinnerPhy.setSelection(0);
+                                    writeToLog("2Mbps not supported!", AppLogFontType.APP_ERROR);
+                                }
+                                else {
+                                    writeToLog("Parameters updated.", AppLogFontType.APP_NORMAL);
+                                }
+                                break;
+                        }
+                    } catch (Exception e) {
+                        Log.e(TAG, e.toString());
+                    }
+                }
+            });
+        }
+        //*********************//
+        if (action.equals(ImageTransferService.DEVICE_DOES_NOT_SUPPORT_IMAGE_TRANSFER)){
+            //showMessage("Device doesn't support UART. Disconnecting");
+            writeToLog("APP: Invalid BLE service, disconnecting!",  AppLogFontType.APP_ERROR);
+            mService.disconnect();
+        }
+        }
+    };
+
+    private void service_init() {
+        Intent bindIntent = new Intent(this, ImageTransferService.class);
+        bindService(bindIntent, mServiceConnection, Context.BIND_AUTO_CREATE);
+  
+        LocalBroadcastManager.getInstance(this).registerReceiver(UARTStatusChangeReceiver, makeGattUpdateIntentFilter());
+    }
+    private static IntentFilter makeGattUpdateIntentFilter() {
+        final IntentFilter intentFilter = new IntentFilter();
+        intentFilter.addAction(ImageTransferService.ACTION_GATT_CONNECTED);
+        intentFilter.addAction(ImageTransferService.ACTION_GATT_DISCONNECTED);
+        intentFilter.addAction(ImageTransferService.ACTION_GATT_SERVICES_DISCOVERED);
+        intentFilter.addAction(ImageTransferService.ACTION_DATA_AVAILABLE);
+        intentFilter.addAction(ImageTransferService.ACTION_IMG_INFO_AVAILABLE);
+        intentFilter.addAction(ImageTransferService.DEVICE_DOES_NOT_SUPPORT_IMAGE_TRANSFER);
+        return intentFilter;
+    }
+    @Override
+    public void onStart() {
+        super.onStart();
+    }
+
+    @Override
+    public void onDestroy() {
+    	 super.onDestroy();
+        Log.d(TAG, "onDestroy()");
+        
+        try {
+        	LocalBroadcastManager.getInstance(this).unregisterReceiver(UARTStatusChangeReceiver);
+        } catch (Exception ignore) {
+            Log.e(TAG, ignore.toString());
+        } 
+        unbindService(mServiceConnection);
+        mService.stopSelf();
+        mService= null;
+       
+    }
+
+    @Override
+    protected void onStop() {
+        Log.d(TAG, "onStop");
+        super.onStop();
+    }
+
+    @Override
+    protected void onPause() {
+        Log.d(TAG, "onPause");
+        super.onPause();
+    }
+
+    @Override
+    protected void onRestart() {
+        super.onRestart();
+        Log.d(TAG, "onRestart");
+    }
+
+    @Override
+    public void onResume() {
+        super.onResume();
+        Log.d(TAG, "onResume");
+        if (!mBtAdapter.isEnabled()) {
+            Log.i(TAG, "onResume - BT not enabled yet");
+            Intent enableIntent = new Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE);
+            startActivityForResult(enableIntent, REQUEST_ENABLE_BT);
+        }
+ 
+    }
+
+    @Override
+    public void onConfigurationChanged(Configuration newConfig) {
+        super.onConfigurationChanged(newConfig);
+    }
+
+
+    @Override
+    public void onActivityResult(int requestCode, int resultCode, Intent data) {
+        switch (requestCode) {
+            case REQUEST_SELECT_DEVICE:
+                //When the DeviceListActivity return, with the selected device address
+                if (resultCode == Activity.RESULT_OK && data != null) {
+                    String deviceAddress = data.getStringExtra(BluetoothDevice.EXTRA_DEVICE);
+                    mDevice = BluetoothAdapter.getDefaultAdapter().getRemoteDevice(deviceAddress);
+
+                    Log.d(TAG, "... onActivityResultdevice.address==" + mDevice + "mserviceValue" + mService);
+                    //((TextView) findViewById(R.id.deviceName)).setText(mDevice.getName()+ " - connecting");
+                    mService.connect(deviceAddress);
+
+                    mConnectionProgDialog.show();
+                }
+                break;
+
+            case REQUEST_ENABLE_BT:
+                // When the request to enable Bluetooth returns
+                if (resultCode == Activity.RESULT_OK) {
+                    Toast.makeText(this, "Bluetooth has turned on ", Toast.LENGTH_SHORT).show();
+
+                } else {
+                    // User did not enable Bluetooth or an error occurred
+                    Log.d(TAG, "BT not enabled");
+                    Toast.makeText(this, "Problem in BT Turning ON ", Toast.LENGTH_SHORT).show();
+                    finish();
+                }
+                break;
+
+            default:
+                Log.e(TAG, "wrong request code");
+                break;
+        }
+    }
+
+    @Override
+    public void onCheckedChanged(RadioGroup group, int checkedId) {
+       
+    }
+
+    
+    private void showMessage(String msg) {
+        Toast.makeText(this, msg, Toast.LENGTH_SHORT).show();
+  
+    }
+
+    @Override
+    public void onBackPressed() {
+        if (mState == UART_PROFILE_CONNECTED) {
+            Intent startMain = new Intent(Intent.ACTION_MAIN);
+            startMain.addCategory(Intent.CATEGORY_HOME);
+            startMain.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            startActivity(startMain);
+            showMessage("nRFUART's running in background.\n             Disconnect to exit");
+        }
+        else {
+            finish();
+        }
+    }
+}
