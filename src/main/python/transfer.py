@@ -3,8 +3,8 @@ import os
 
 
 def main(path):
-    access_key = 'AKIARJNMNEDDO76DHN7W'
-    secret_key = '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'
+    access_key = ''
+    secret_key = ''
 
     session = boto3.Session(
         aws_access_key_id=access_key,
@@ -12,5 +12,5 @@ def main(path):
     )
 
     s3 = session.client('s3')
-    s3.upload_file(path, "aws-equitables", "Output.zip")
+    s3.upload_file(path, "", "")
     return "Sent Successfully"
